@@ -14,12 +14,13 @@
 package mqrpc
 
 import (
-	"github.com/liangdas/mqant/conf"
+	"context"
 	"github.com/liangdas/mqant/rpc/pb"
+	"reflect"
 )
 
 type FunctionInfo struct {
-	Function  interface{}
+	Function  reflect.Value
 	Goroutine bool
 }
 
@@ -58,27 +59,20 @@ type GoroutineControl interface {
 }
 
 type RPCServer interface {
-	NewRabbitmqRPCServer(info *conf.Rabbitmq) (err error)
-	NewRedisRPCServer(info *conf.Redis) (err error)
-	NewUdpRPCServer(info *conf.UDP) (err error)
+	Addr() string
 	SetListener(listener RPCListener)
 	SetGoroutineControl(control GoroutineControl)
 	GetExecuting() int64
-	GetLocalServer() LocalServer
 	Register(id string, f interface{})
 	RegisterGO(id string, f interface{})
 	Done() (err error)
 }
 
 type RPCClient interface {
-	NewRabbitmqClient(info *conf.Rabbitmq) (err error)
-	NewRedisClient(info *conf.Redis) (err error)
-	NewUdpClient(info *conf.UDP) (err error)
-	NewLocalClient(server RPCServer) (err error)
 	Done() (err error)
-	CallArgs(_func string, ArgsType []string, args [][]byte) (interface{}, string)
+	CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (interface{}, string)
 	CallNRArgs(_func string, ArgsType []string, args [][]byte) (err error)
-	Call(_func string, params ...interface{}) (interface{}, string)
+	Call(ctx context.Context, _func string, params ...interface{}) (interface{}, string)
 	CallNR(_func string, params ...interface{}) (err error)
 }
 
@@ -93,4 +87,20 @@ type LocalServer interface {
 	StopConsume() error
 	Shutdown() (err error)
 	Callback(callinfo CallInfo) error
+}
+
+// Marshaler is a simple encoding interface used for the broker/transport
+// where headers are not supported by the underlying implementation.
+type Marshaler interface {
+	Marshal() ([]byte, error)
+	Unmarshal([]byte) error
+	String() string
+}
+
+type ParamOption func() []interface{}
+
+func Param(params ...interface{}) ParamOption {
+	return func() []interface{} {
+		return params
+	}
 }

@@ -16,6 +16,7 @@ package gate
 import (
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/network"
+	"time"
 )
 
 var RPC_PARAM_SESSION_TYPE = "SESSION"
@@ -25,6 +26,8 @@ var RPC_PARAM_ProtocolMarshal_TYPE = "ProtocolMarshal"
 net代理服务 处理器
 */
 type GateHandler interface {
+	GetAgent(Sessionid string) (Agent, error)
+	GetAgentNum() int
 	Bind(span log.TraceSpan, Sessionid string, Userid string) (result Session, err string)                 //Bind the session with the the Userid.
 	UnBind(span log.TraceSpan, Sessionid string) (result Session, err string)                              //UnBind the session with the the Userid.
 	Set(span log.TraceSpan, Sessionid string, key string, value string) (result Session, err string)       //Set values (one or many) for the session.
@@ -42,6 +45,7 @@ type GateHandler interface {
 
 type Session interface {
 	GetIP() string
+	GetTopic() string
 	GetNetwork() string
 	GetUserId() string
 	GetUserIdInt64() int64
@@ -49,6 +53,7 @@ type Session interface {
 	GetServerId() string
 	GetSettings() map[string]string
 	SetIP(ip string)
+	SetTopic(topic string)
 	SetNetwork(network string)
 	SetUserId(userid string)
 	SetSessionId(sessionid string)
@@ -60,7 +65,8 @@ type Session interface {
 	UnBind() (err string)
 	Push() (err string)
 	Set(key string, value string) (err string)
-	SetPush(key string, value string) (err string) //设置值以后立即推送到gate网关
+	SetPush(key string, value string) (err string)    //设置值以后立即推送到gate网关,跟Set功能相同
+	SetBatch(settings map[string]string) (err string) //批量设置settings,跟当前已存在的settings合并,如果跟当前已存在的key重复则会被新value覆盖
 	Get(key string) (result string)
 	Remove(key string) (err string)
 	Send(topic string, body []byte) (err string)
@@ -94,11 +100,11 @@ type StorageHandler interface {
 	存储用户的Session信息
 	Session Bind Userid以后每次设置 settings都会调用一次Storage
 	*/
-	Storage(Userid string, session Session) (err error)
+	Storage(session Session) (err error)
 	/**
 	强制删除Session信息
 	*/
-	Delete(Userid string) (err error)
+	Delete(session Session) (err error)
 	/**
 	获取用户Session信息
 	Bind Userid时会调用Query获取最新信息
@@ -108,14 +114,7 @@ type StorageHandler interface {
 	用户心跳,一般用户在线时1s发送一次
 	可以用来延长Session信息过期时间
 	*/
-	Heartbeat(Userid string)
-}
-
-type TracingHandler interface {
-	/**
-	是否需要对本次客户端请求进行跟踪
-	*/
-	OnRequestTracing(session Session, topic string, msg []byte) bool
+	Heartbeat(session Session)
 }
 
 type RouteHandler interface {
@@ -142,6 +141,7 @@ type Agent interface {
 	Run() (err error)
 	OnClose() error
 	Destroy()
+	ConnTime() time.Time
 	RevNum() int64
 	SendNum() int64
 	IsClosed() bool
@@ -149,12 +149,11 @@ type Agent interface {
 }
 
 type Gate interface {
-	GetMinStorageHeartbeat() int64
+	Options() Options
 	GetGateHandler() GateHandler
 	GetAgentLearner() AgentLearner
 	GetSessionLearner() SessionLearner
 	GetStorageHandler() StorageHandler
-	GetTracingHandler() TracingHandler
 	GetRouteHandler() RouteHandler
 	GetJudgeGuest() func(session Session) bool
 	NewSession(data []byte) (Session, error)

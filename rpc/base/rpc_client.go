@@ -14,9 +14,9 @@
 package defaultrpc
 
 import (
+	"context"
 	"fmt"
 	"github.com/golang/protobuf/proto"
-	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/module"
 	"github.com/liangdas/mqant/rpc"
@@ -27,81 +27,30 @@ import (
 )
 
 type RPCClient struct {
-	app           module.App
-	serverId      string
-	remote_client *AMQPClient
-	local_client  *LocalClient
-	redis_client  *RedisClient
-	udp_client    *UDPClient
+	app         module.App
+	nats_client *NatsClient
 }
 
-func NewRPCClient(app module.App, serverId string) (mqrpc.RPCClient, error) {
+func NewRPCClient(app module.App, session module.ServerSession) (mqrpc.RPCClient, error) {
 	rpc_client := new(RPCClient)
-	rpc_client.serverId = serverId
 	rpc_client.app = app
+	nats_client, err := NewNatsClient(app, session)
+	if err != nil {
+		log.Error("Dial: %s", err)
+		return nil, err
+	}
+	rpc_client.nats_client = nats_client
 	return rpc_client, nil
 }
 
-func (c *RPCClient) NewRabbitmqClient(info *conf.Rabbitmq) (err error) {
-	//创建本地连接
-	if info != nil && c.remote_client == nil {
-		c.remote_client, err = NewAMQPClient(info)
-		if err != nil {
-			log.Error("Dial: %s", err)
-			return err
-		}
-	}
-	return
-}
-
-func (c *RPCClient) NewLocalClient(server mqrpc.RPCServer) (err error) {
-	//创建本地连接
-	if server != nil && server.GetLocalServer() != nil && c.local_client == nil {
-		c.local_client, err = NewLocalClient(server.GetLocalServer())
-		if err != nil {
-			log.Error("Dial: %s", err)
-			return err
-		}
-	}
-	return
-}
-
-func (c *RPCClient) NewRedisClient(info *conf.Redis) (err error) {
-	if info != nil && c.redis_client == nil {
-		c.redis_client, err = NewRedisClient(info)
-		if err != nil {
-			log.Error("Dial: %s", err)
-			return err
-		}
-	}
-	return
-}
-
-func (c *RPCClient) NewUdpClient(info *conf.UDP) (err error) {
-	if info != nil && c.udp_client == nil {
-		c.udp_client, err = NewUDPClient(info)
-		if err != nil {
-			log.Error("Dial: %s", err)
-			return err
-		}
-	}
-	return
-}
-
 func (c *RPCClient) Done() (err error) {
-	if c.remote_client != nil {
-		err = c.remote_client.Done()
-	}
-	if c.redis_client != nil {
-		err = c.redis_client.Done()
-	}
-	if c.local_client != nil {
-		err = c.local_client.Done()
+	if c.nats_client != nil {
+		err = c.nats_client.Done()
 	}
 	return
 }
 
-func (c *RPCClient) CallArgs(_func string, ArgsType []string, args [][]byte) (interface{}, string) {
+func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (interface{}, string) {
 	var correlation_id = uuid.Rand().Hex()
 	rpcInfo := &rpcpb.RPCInfo{
 		Fn:       *proto.String(_func),
@@ -118,29 +67,35 @@ func (c *RPCClient) CallArgs(_func string, ArgsType []string, args [][]byte) (in
 	callback := make(chan rpcpb.ResultInfo, 1)
 	var err error
 	//优先使用本地rpc
-	if c.local_client != nil {
-		err = c.local_client.Call(*callInfo, callback)
-	} else if c.remote_client != nil {
-		err = c.remote_client.Call(*callInfo, callback)
-	} else if c.redis_client != nil {
-		err = c.redis_client.Call(*callInfo, callback)
-	} else if c.udp_client != nil {
-		err = c.udp_client.Call(*callInfo, callback)
-	} else {
-		return nil, fmt.Sprintf("rpc service (%s) connection failed", c.serverId)
-	}
+	//if c.local_client != nil {
+	//	err = c.local_client.Call(*callInfo, callback)
+	//} else
+	err = c.nats_client.Call(*callInfo, callback)
 	if err != nil {
 		return nil, err.Error()
 	}
-	resultInfo, ok := <-callback
-	if !ok {
-		return nil, "client closed"
+	if ctx == nil {
+		ctx, _ = context.WithTimeout(context.TODO(), time.Second*time.Duration(c.app.GetSettings().Rpc.RpcExpired))
 	}
-	result, err := argsutil.Bytes2Args(c.app, resultInfo.ResultType, resultInfo.Result)
-	if err != nil {
-		return nil, err.Error()
+	select {
+	case resultInfo, ok := <-callback:
+		if !ok {
+			return nil, "client closed"
+		}
+		result, err := argsutil.Bytes2Args(c.app, resultInfo.ResultType, resultInfo.Result)
+		if err != nil {
+			return nil, err.Error()
+		}
+		return result, resultInfo.Error
+	case <-ctx.Done():
+		close(callback)
+		c.nats_client.Delete(rpcInfo.Cid)
+		return nil, "deadline exceeded"
+		//case <-time.After(time.Second * time.Duration(c.app.GetSettings().Rpc.RpcExpired)):
+		//	close(callback)
+		//	c.nats_client.Delete(rpcInfo.Cid)
+		//	return nil, "deadline exceeded"
 	}
-	return result, resultInfo.Error
 }
 
 func (c *RPCClient) CallNRArgs(_func string, ArgsType []string, args [][]byte) (err error) {
@@ -157,24 +112,16 @@ func (c *RPCClient) CallNRArgs(_func string, ArgsType []string, args [][]byte) (
 		RpcInfo: *rpcInfo,
 	}
 	//优先使用本地rpc
-	if c.local_client != nil {
-		err = c.local_client.CallNR(*callInfo)
-	} else if c.remote_client != nil {
-		err = c.remote_client.CallNR(*callInfo)
-	} else if c.redis_client != nil {
-		err = c.redis_client.CallNR(*callInfo)
-	} else if c.udp_client != nil {
-		err = c.udp_client.CallNR(*callInfo)
-	} else {
-		return fmt.Errorf("rpc service (%s) connection failed", c.serverId)
-	}
-	return nil
+	//if c.local_client != nil {
+	//	err = c.local_client.CallNR(*callInfo)
+	//} else
+	return c.nats_client.CallNR(*callInfo)
 }
 
 /**
 消息请求 需要回复
 */
-func (c *RPCClient) Call(_func string, params ...interface{}) (interface{}, string) {
+func (c *RPCClient) Call(ctx context.Context, _func string, params ...interface{}) (interface{}, string) {
 	var ArgsType []string = make([]string, len(params))
 	var args [][]byte = make([][]byte, len(params))
 	var span log.TraceSpan = nil
@@ -191,9 +138,9 @@ func (c *RPCClient) Call(_func string, params ...interface{}) (interface{}, stri
 		}
 	}
 	start := time.Now()
-	r, errstr := c.CallArgs(_func, ArgsType, args)
+	r, errstr := c.CallArgs(ctx, _func, ArgsType, args)
 	if c.app.GetSettings().Rpc.Log {
-		log.TInfo(span, "RPC Call ServerId = %v Func = %v Elapsed = %v Result = %v ERROR = %v", c.serverId, _func, time.Since(start), r, errstr)
+		log.TInfo(span, "RPC Call ServerId = %v Func = %v Elapsed = %v Result = %v ERROR = %v", c.nats_client.session.GetId(), _func, time.Since(start), r, errstr)
 	}
 	return r, errstr
 }
@@ -220,7 +167,7 @@ func (c *RPCClient) CallNR(_func string, params ...interface{}) (err error) {
 	start := time.Now()
 	err = c.CallNRArgs(_func, ArgsType, args)
 	if c.app.GetSettings().Rpc.Log {
-		log.TInfo(span, "RPC CallNR ServerId = %v Func = %v Elapsed = %v ERROR = %v", c.serverId, _func, time.Since(start), err)
+		log.TInfo(span, "RPC CallNR ServerId = %v Func = %v Elapsed = %v ERROR = %v", c.nats_client.session.GetId(), _func, time.Since(start), err)
 	}
 	return err
 }

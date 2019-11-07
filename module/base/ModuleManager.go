@@ -47,11 +47,11 @@ func (mer *ModuleManager) RegisterRunMod(mi module.Module) {
 }
 
 func (mer *ModuleManager) Init(app module.App, ProcessID string) {
-	log.Info("This service ProcessID is [%s]", ProcessID)
+	log.Info("This service ModuleGroup(ProcessID) is [%s]", ProcessID)
 	mer.app = app
 	mer.CheckModuleSettings() //配置文件规则检查
 	for i := 0; i < len(mer.mods); i++ {
-		for Type, modSettings := range conf.Conf.Module {
+		for Type, modSettings := range app.GetSettings().Module {
 			if mer.mods[i].mi.GetType() == Type {
 				//匹配
 				for _, setting := range modSettings {
@@ -112,26 +112,5 @@ func (mer *ModuleManager) Destroy() {
 		m.closeSig <- true
 		m.wg.Wait()
 		destroy(m)
-	}
-}
-func (mer *ModuleManager) ReportStatistics(args interface{}) {
-	if mer.app.GetSettings().Master.Enable {
-		for _, m := range mer.runMods {
-			mi := m.mi
-			switch value := mi.(type) {
-			case module.RPCModule:
-				//汇报统计
-				servers := mer.app.GetServersByType("Master")
-				if len(servers) == 1 {
-					b, _ := value.GetStatistical()
-					_, err := servers[0].Call("ReportForm", value.GetType(), m.settings.ProcessID, m.settings.Id, value.Version(), b, value.GetExecuting())
-					if err != "" {
-						log.Warning("Report To Master error :", err)
-					}
-				}
-			default:
-			}
-		}
-		//timer.SetTimer(3, mer.ReportStatistics, nil)
 	}
 }

@@ -14,8 +14,12 @@
 package module
 
 import (
+	"context"
 	"github.com/liangdas/mqant/conf"
+	"github.com/liangdas/mqant/registry"
 	"github.com/liangdas/mqant/rpc"
+	"github.com/liangdas/mqant/selector"
+	"github.com/nats-io/nats.go"
 )
 
 type ProtocolMarshal interface {
@@ -24,36 +28,36 @@ type ProtocolMarshal interface {
 
 type ServerSession interface {
 	GetId() string
-	GetType() string
+	GetName() string
 	GetRpc() mqrpc.RPCClient
-	Call(_func string, params ...interface{}) (interface{}, string)
+	GetApp() App
+	GetNode() *registry.Node
+	SetNode(node *registry.Node) (err error)
+	Call(ctx context.Context, _func string, params ...interface{}) (interface{}, string)
 	CallNR(_func string, params ...interface{}) (err error)
-	CallArgs(_func string, ArgsType []string, args [][]byte) (interface{}, string)
+	CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (interface{}, string)
 	CallNRArgs(_func string, ArgsType []string, args [][]byte) (err error)
 }
 type App interface {
-	Run(debug bool, mods ...Module) error
-	/**
-	当同一个类型的Module存在多个服务时,需要根据情况选择最终路由到哪一个服务去
-	fn: func(moduleType string,serverId string,[]*ServerSession)(*ServerSession)
-	*/
-	Route(moduleType string, fn func(app App, Type string, hash string) ServerSession) error
+	Run(mods ...Module) error
 	SetMapRoute(fn func(app App, route string) string) error
 	Configure(settings conf.Config) error
 	OnInit(settings conf.Config) error
 	OnDestroy() error
-	RegisterLocalClient(serverId string, server mqrpc.RPCServer) error
+	Options() Options
+	Transport() *nats.Conn
+	Registry() registry.Registry
 	GetServerById(id string) (ServerSession, error)
 	/**
 	filter		 调用者服务类型    moduleType|moduleType@moduleID
 	Type	   	想要调用的服务类型
 	*/
-	GetRouteServer(filter string, hash string) (ServerSession, error) //获取经过筛选过的服务
+	GetRouteServer(filter string, opts ...selector.SelectOption) (ServerSession, error) //获取经过筛选过的服务
 	GetServersByType(Type string) []ServerSession
 	GetSettings() conf.Config //获取配置信息
 	RpcInvoke(module RPCModule, moduleType string, _func string, params ...interface{}) (interface{}, string)
 	RpcInvokeNR(module RPCModule, moduleType string, _func string, params ...interface{}) error
-
+	RpcCall(ctx context.Context, moduleType, _func string, param mqrpc.ParamOption, opts ...selector.SelectOption) (interface{}, string)
 	/**
 	添加一个 自定义参数序列化接口
 	gate,system 关键词一被占用请使用其他名称
@@ -75,6 +79,7 @@ type App interface {
 	ProtocolMarshal(Trace string, Result interface{}, Error string) (ProtocolMarshal, string)
 	NewProtocolMarshal(data []byte) ProtocolMarshal
 	GetProcessID() string
+	WorkDir() string
 }
 
 type Module interface {
@@ -88,18 +93,28 @@ type Module interface {
 	Run(closeSig chan bool)
 }
 type RPCModule interface {
+	context.Context
 	Module
 	GetServerId() string //模块类型
 	RpcInvoke(moduleType string, _func string, params ...interface{}) (interface{}, string)
 	RpcInvokeNR(moduleType string, _func string, params ...interface{}) error
 	RpcInvokeArgs(moduleType string, _func string, ArgsType []string, args [][]byte) (interface{}, string)
 	RpcInvokeNRArgs(moduleType string, _func string, ArgsType []string, args [][]byte) error
+	/*
+		通用RPC调度函数
+		ctx 		context.Context 			上下文,可以设置这次请求的超时时间
+		moduleType	string 						服务名称
+		_func		string						需要调度的服务方法
+		param 		mqrpc.ParamOption			方法传参
+		opts ...selector.SelectOption			服务发现模块过滤，可以用来选择调用哪个服务节点
+	*/
+	RpcCall(ctx context.Context, moduleType, _func string, param mqrpc.ParamOption, opts ...selector.SelectOption) (interface{}, string)
 	GetModuleSettings() (settings *conf.ModuleSettings)
 	/**
 	filter		 调用者服务类型    moduleType|moduleType@moduleID
 	Type	   	想要调用的服务类型
 	*/
-	GetRouteServer(filter string, hash string) (ServerSession, error)
+	GetRouteServer(filter string, opts ...selector.SelectOption) (ServerSession, error)
 	GetStatistical() (statistical string, err error)
 	GetExecuting() int64
 }

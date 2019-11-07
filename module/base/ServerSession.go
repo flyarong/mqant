@@ -14,40 +14,61 @@
 package basemodule
 
 import (
+	"context"
 	"github.com/liangdas/mqant/module"
+	"github.com/liangdas/mqant/registry"
 	"github.com/liangdas/mqant/rpc"
+	"github.com/liangdas/mqant/rpc/base"
 )
 
-func NewServerSession(Id string, Stype string, Rpc mqrpc.RPCClient) module.ServerSession {
+func NewServerSession(app module.App, name string, node *registry.Node) (module.ServerSession, error) {
 	session := &serverSession{
-		Id:    Id,
-		Stype: Stype,
-		Rpc:   Rpc,
+		name: name,
+		node: node,
+		app:  app,
 	}
-	return session
+	rpc, err := defaultrpc.NewRPCClient(app, session)
+	if err != nil {
+		return nil, err
+	}
+	session.Rpc = rpc
+	return session, err
 }
 
 type serverSession struct {
-	Id    string
-	Stype string
-	Rpc   mqrpc.RPCClient
+	node *registry.Node
+	name string
+	Rpc  mqrpc.RPCClient
+	app  module.App
 }
 
 func (c *serverSession) GetId() string {
-	return c.Id
+	return c.node.Id
 }
-func (c *serverSession) GetType() string {
-	return c.Stype
+func (c *serverSession) GetName() string {
+	return c.name
 }
 func (c *serverSession) GetRpc() mqrpc.RPCClient {
 	return c.Rpc
 }
 
+func (c *serverSession) GetApp() module.App {
+	return c.app
+}
+func (c *serverSession) GetNode() *registry.Node {
+	return c.node
+}
+
+func (c *serverSession) SetNode(node *registry.Node) (err error) {
+	c.node = node
+	return
+}
+
 /**
 消息请求 需要回复
 */
-func (c *serverSession) Call(_func string, params ...interface{}) (interface{}, string) {
-	return c.Rpc.Call(_func, params...)
+func (c *serverSession) Call(ctx context.Context, _func string, params ...interface{}) (interface{}, string) {
+	return c.Rpc.Call(ctx, _func, params...)
 }
 
 /**
@@ -60,8 +81,8 @@ func (c *serverSession) CallNR(_func string, params ...interface{}) (err error) 
 /**
 消息请求 需要回复
 */
-func (c *serverSession) CallArgs(_func string, ArgsType []string, args [][]byte) (interface{}, string) {
-	return c.Rpc.CallArgs(_func, ArgsType, args)
+func (c *serverSession) CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (interface{}, string) {
+	return c.Rpc.CallArgs(ctx, _func, ArgsType, args)
 }
 
 /**
