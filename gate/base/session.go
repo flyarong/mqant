@@ -15,24 +15,29 @@ package basegate
 
 import (
 	"fmt"
+	"strconv"
+	"sync"
+
 	"github.com/golang/protobuf/proto"
 	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/module"
-	"github.com/liangdas/mqant/rpc"
+	mqrpc "github.com/liangdas/mqant/rpc"
 	"github.com/liangdas/mqant/utils"
-	"strconv"
 )
 
 type sessionagent struct {
 	app        module.App
 	session    *SessionImp
+	lock       *sync.RWMutex
+	userdata   interface{}
 	judgeGuest func(session gate.Session) bool
 }
 
 func NewSession(app module.App, data []byte) (gate.Session, error) {
 	agent := &sessionagent{
-		app: app,
+		app:  app,
+		lock: new(sync.RWMutex),
 	}
 	se := &SessionImp{}
 	err := proto.Unmarshal(data, se)
@@ -40,6 +45,9 @@ func NewSession(app module.App, data []byte) (gate.Session, error) {
 		return nil, err
 	} // 测试结果
 	agent.session = se
+	if agent.session.GetSettings() == nil {
+		agent.session.Settings = make(map[string]string)
+	}
 	return agent, nil
 }
 
@@ -47,10 +55,14 @@ func NewSessionByMap(app module.App, data map[string]interface{}) (gate.Session,
 	agent := &sessionagent{
 		app:     app,
 		session: new(SessionImp),
+		lock:    new(sync.RWMutex),
 	}
 	err := agent.updateMap(data)
 	if err != nil {
 		return nil, err
+	}
+	if agent.session.GetSettings() == nil {
+		agent.session.Settings = make(map[string]string)
 	}
 	return agent, nil
 }
@@ -91,6 +103,10 @@ func (this *sessionagent) GetSettings() map[string]string {
 	return this.session.GetSettings()
 }
 
+func (this *sessionagent) LocalUserData() interface{} {
+	return this.userdata
+}
+
 func (this *sessionagent) SetIP(ip string) {
 	this.session.IP = ip
 }
@@ -101,7 +117,9 @@ func (this *sessionagent) SetNetwork(network string) {
 	this.session.Network = network
 }
 func (this *sessionagent) SetUserId(userid string) {
+	this.lock.Lock()
 	this.session.UserId = userid
+	this.lock.Unlock()
 }
 func (this *sessionagent) SetSessionId(sessionid string) {
 	this.session.SessionId = sessionid
@@ -110,7 +128,25 @@ func (this *sessionagent) SetServerId(serverid string) {
 	this.session.ServerId = serverid
 }
 func (this *sessionagent) SetSettings(settings map[string]string) {
+	this.lock.Lock()
 	this.session.Settings = settings
+	this.lock.Unlock()
+}
+func (this *sessionagent) SetLocalKV(key, value string) error {
+	this.lock.Lock()
+	this.session.GetSettings()[key] = value
+	this.lock.Unlock()
+	return nil
+}
+func (this *sessionagent) RemoveLocalKV(key string) error {
+	this.lock.Lock()
+	delete(this.session.GetSettings(), key)
+	this.lock.Unlock()
+	return nil
+}
+func (this *sessionagent) SetLocalUserData(data interface{}) error {
+	this.userdata = data
+	return nil
 }
 
 func (this *sessionagent) updateMap(s map[string]interface{}) error {
@@ -145,6 +181,8 @@ func (this *sessionagent) updateMap(s map[string]interface{}) error {
 }
 
 func (this *sessionagent) update(s gate.Session) error {
+	this.lock.Lock()
+	defer this.lock.Unlock()
 	Userid := s.GetUserId()
 	this.session.UserId = Userid
 	IP := s.GetIP()
@@ -183,6 +221,9 @@ func (this *sessionagent) Unmarshal(data []byte) error {
 		return err
 	} // 测试结果
 	this.session = se
+	if this.session.GetSettings() == nil {
+		this.session.Settings = make(map[string]string)
+	}
 	return nil
 }
 func (this *sessionagent) String() string {
@@ -259,7 +300,13 @@ func (this *sessionagent) Push() (err string) {
 		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	result, err := server.Call(nil, "Push", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, this.session.Settings)
+	this.lock.Lock()
+	tmp := map[string]string{}
+	for k, v := range this.session.Settings {
+		tmp[k] = v
+	}
+	this.lock.Unlock()
+	result, err := server.Call(nil, "Push", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, tmp)
 	if err == "" {
 		if result != nil {
 			//绑定成功,重新更新当前Session
@@ -300,7 +347,9 @@ func (this *sessionagent) SetPush(key string, value string) (err string) {
 	if this.session.Settings == nil {
 		this.session.Settings = map[string]string{}
 	}
+	this.lock.Lock()
 	this.session.Settings[key] = value
+	this.lock.Unlock()
 	return this.Push()
 }
 func (this *sessionagent) SetBatch(settings map[string]string) (err string) {
@@ -326,7 +375,9 @@ func (this *sessionagent) Get(key string) (result string) {
 	if this.session.Settings == nil {
 		return
 	}
+	this.lock.RLock()
 	result = this.session.Settings[key]
+	this.lock.RUnlock()
 	return
 }
 
@@ -433,6 +484,8 @@ func (this *sessionagent) Close() (err string) {
 func (this *sessionagent) Clone() gate.Session {
 	agent := &sessionagent{
 		app: this.app,
+		userdata:this.userdata,
+		lock: new(sync.RWMutex),
 	}
 	se := &SessionImp{
 		IP:        this.session.IP,
@@ -464,6 +517,8 @@ func (this *sessionagent) SpanId() string {
 func (this *sessionagent) ExtractSpan() log.TraceSpan {
 	agent := &sessionagent{
 		app: this.app,
+		userdata:this.userdata,
+		lock: new(sync.RWMutex),
 	}
 	se := &SessionImp{
 		IP:        this.session.IP,

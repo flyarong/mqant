@@ -27,6 +27,7 @@ type Options struct {
 	AgentLearner    AgentLearner
 	SessionLearner  SessionLearner
 	GateHandler     GateHandler
+	SendMessageHook SendMessageHook
 }
 
 func NewOptions(opts ...Option) Options {
@@ -90,5 +91,11 @@ func SetGateHandler(s GateHandler) Option {
 func SetSessionLearner(s SessionLearner) Option {
 	return func(o *Options) {
 		o.SessionLearner = s
+	}
+}
+
+func SetSendMessageHook(s SendMessageHook) Option {
+	return func(o *Options) {
+		o.SendMessageHook = s
 	}
 }

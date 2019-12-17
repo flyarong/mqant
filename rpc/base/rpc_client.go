@@ -50,7 +50,10 @@ func (c *RPCClient) Done() (err error) {
 	return
 }
 
-func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (interface{}, string) {
+func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []string, args [][]byte) (r interface{}, e string) {
+
+	start := time.Now()
+
 	var correlation_id = uuid.Rand().Hex()
 	rpcInfo := &rpcpb.RPCInfo{
 		Fn:       *proto.String(_func),
@@ -60,7 +63,13 @@ func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []strin
 		Args:     args,
 		ArgsType: ArgsType,
 	}
-
+	defer func() {
+		//异常日志都应该打印
+		if c.app.Options().ClientRPChandler!=nil{
+			exec_time:=time.Since(start).Nanoseconds()
+			c.app.Options().ClientRPChandler(c.app,*c.nats_client.session.GetNode(),*rpcInfo,r,e,exec_time)
+		}
+	}()
 	callInfo := &mqrpc.CallInfo{
 		RpcInfo: *rpcInfo,
 	}
@@ -88,7 +97,7 @@ func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []strin
 		}
 		return result, resultInfo.Error
 	case <-ctx.Done():
-		close(callback)
+		c.close_callback_chan(callback)
 		c.nats_client.Delete(rpcInfo.Cid)
 		return nil, "deadline exceeded"
 		//case <-time.After(time.Second * time.Duration(c.app.GetSettings().Rpc.RpcExpired)):
@@ -97,7 +106,15 @@ func (c *RPCClient) CallArgs(ctx context.Context, _func string, ArgsType []strin
 		//	return nil, "deadline exceeded"
 	}
 }
+func (c *RPCClient) close_callback_chan(ch chan rpcpb.ResultInfo) {
+	defer func() {
+		if recover() != nil {
+			// close(ch) panic occur
+		}
+	}()
 
+	close(ch) // panic if ch is closed
+}
 func (c *RPCClient) CallNRArgs(_func string, ArgsType []string, args [][]byte) (err error) {
 	var correlation_id = uuid.Rand().Hex()
 	rpcInfo := &rpcpb.RPCInfo{

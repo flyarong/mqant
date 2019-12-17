@@ -42,7 +42,7 @@ type GateHandler interface {
 	Update(span log.TraceSpan, Sessionid string) (result Session, err string)    //更新整个Session 通常是其他模块拉取最新数据
 	OnDestroy()                                                                  //退出事件,主动关闭所有的连接
 }
-
+//不是线程安全的
 type Session interface {
 	GetIP() string
 	GetTopic() string
@@ -52,6 +52,8 @@ type Session interface {
 	GetSessionId() string
 	GetServerId() string
 	GetSettings() map[string]string
+	//网关本地的额外数据,不会再rpc中传递
+	LocalUserData() interface{}
 	SetIP(ip string)
 	SetTopic(topic string)
 	SetNetwork(network string)
@@ -59,6 +61,10 @@ type Session interface {
 	SetSessionId(sessionid string)
 	SetServerId(serverid string)
 	SetSettings(settings map[string]string)
+	SetLocalKV(key, value string) error
+	RemoveLocalKV(key string) error
+	//网关本地的额外数据,不会再rpc中传递
+	SetLocalUserData(data interface{}) error
 	Serializable() ([]byte, error)
 	Update() (err string)
 	Bind(UserId string) (err string)
@@ -123,6 +129,11 @@ type RouteHandler interface {
 	*/
 	OnRoute(session Session, topic string, msg []byte) (bool, interface{}, error)
 }
+
+/**
+给客户端下发消息
+*/
+type SendMessageHook func(session Session, topic string, msg []byte) ([]byte, error)
 
 type AgentLearner interface {
 	Connect(a Agent)    //当连接建立  并且MQTT协议握手成功

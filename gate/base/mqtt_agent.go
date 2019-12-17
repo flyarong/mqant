@@ -16,6 +16,7 @@ package basegate
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/gate"
@@ -93,13 +94,16 @@ func (a *agent) Wait() error {
 }
 func (a *agent) Finish() {
 	// 完成则从ch推出数据
-	<-a.ch
+	select {
+	case <-a.ch:
+	default:
+	}
 }
 
 func (a *agent) Run() (err error) {
 	defer func() {
 		if err := recover(); err != nil {
-			buff := make([]byte, 4096)
+			buff := make([]byte, 1024)
 			runtime.Stack(buff, false)
 			log.Error("conn.serve() panic(%v)\n info:%s", err, string(buff))
 		}
@@ -107,6 +111,13 @@ func (a *agent) Run() (err error) {
 
 	}()
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				buff := make([]byte, 1024)
+				runtime.Stack(buff, false)
+				log.Error("OverTime panic(%v)\n info:%s", err, string(buff))
+			}
+		}()
 		select {
 		case <-time.After(a.gate.Options().OverTime):
 			if a.GetSession() == nil {
@@ -151,20 +162,26 @@ func (a *agent) Run() (err error) {
 		return
 	}
 	a.session.JudgeGuest(a.gate.GetJudgeGuest())
-	a.session.CreateTrace()             //代码跟踪
-	a.gate.GetAgentLearner().Connect(a) //发送连接成功的事件
-
+	a.session.CreateTrace() //代码跟踪
 	//回复客户端 CONNECT
 	err = mqtt.WritePack(mqtt.GetConnAckPack(0), a.w)
 	if err != nil {
 		return
 	}
 	a.conn_time = time.Now()
-	c.Listen_loop() //开始监听,直到连接中断
+	a.gate.GetAgentLearner().Connect(a) //发送连接成功的事件
+	c.Listen_loop()                     //开始监听,直到连接中断
 	return nil
 }
 
 func (a *agent) OnClose() error {
+	defer func() {
+		if err := recover(); err != nil {
+			buff := make([]byte, 1024)
+			runtime.Stack(buff, false)
+			log.Error("agent OnClose panic(%v)\n info:%s", err, string(buff))
+		}
+	}()
 	a.isclose = true
 	a.gate.GetAgentLearner().DisConnect(a) //发送连接断开的事件
 	return nil
@@ -182,7 +199,7 @@ func (a *agent) ConnTime() time.Time {
 func (a *agent) OnRecover(pack *mqtt.Pack) {
 	err := a.Wait()
 	if err != nil {
-		log.Warning("Gate OnRecover error [%v]", err)
+		log.Error("Gate OnRecover error [%v]", err)
 		pub := pack.GetVariable().(*mqtt.Publish)
 		a.toResult(a, *pub.GetTopic(), nil, err.Error())
 	} else {
@@ -210,7 +227,7 @@ func (a *agent) recoverworker(pack *mqtt.Pack) {
 	defer a.Finish()
 	defer func() {
 		if r := recover(); r != nil {
-			buff := make([]byte, 4096)
+			buff := make([]byte, 1024)
 			runtime.Stack(buff, false)
 			log.Error("Gate recoverworker error [%v] stack : %v", r, string(buff))
 		}
@@ -225,9 +242,8 @@ func (a *agent) recoverworker(pack *mqtt.Pack) {
 		a.lock.Unlock()
 		pub := pack.GetVariable().(*mqtt.Publish)
 		topics := strings.Split(*pub.GetTopic(), "/")
-		a.session.CreateTrace()
 		if a.gate.GetRouteHandler() != nil {
-			needreturn, result, err := a.gate.GetRouteHandler().OnRoute(a.session, *pub.GetTopic(), pub.GetMsg())
+			needreturn, result, err := a.gate.GetRouteHandler().OnRoute(a.GetSession(), *pub.GetTopic(), pub.GetMsg())
 			if err != nil {
 				if needreturn {
 					toResult(a, *pub.GetTopic(), result, err.Error())
@@ -280,10 +296,11 @@ func (a *agent) recoverworker(pack *mqtt.Pack) {
 				ArgsType[1] = argsutil.BYTES
 				args[1] = pub.GetMsg()
 			}
-			a.session.SetTopic(*pub.GetTopic())
+			session:=a.GetSession().Clone()
+			session.SetTopic(*pub.GetTopic())
 			if msgid != "" {
 				ArgsType[0] = RPC_PARAM_SESSION_TYPE
-				b, err := a.GetSession().Serializable()
+				b, err := session.Serializable()
 				if err != nil {
 					return
 				}
@@ -292,7 +309,7 @@ func (a *agent) recoverworker(pack *mqtt.Pack) {
 				toResult(a, *pub.GetTopic(), result, e)
 			} else {
 				ArgsType[0] = RPC_PARAM_SESSION_TYPE
-				b, err := a.GetSession().Serializable()
+				b, err := session.Serializable()
 				if err != nil {
 					return
 				}
@@ -338,14 +355,28 @@ func (a *agent) recoverworker(pack *mqtt.Pack) {
 }
 
 func (a *agent) WriteMsg(topic string, body []byte) error {
+	if a.client == nil {
+		return errors.New("mqtt.Client nil")
+	}
 	a.send_num++
+	if a.gate.Options().SendMessageHook != nil {
+		bb, err := a.gate.Options().SendMessageHook(a.GetSession(), topic, body)
+		if err != nil {
+			return err
+		}
+		body = bb
+	}
 	return a.client.WriteMsg(topic, body)
 }
 
 func (a *agent) Close() {
-	a.conn.Close()
+	if a.conn != nil {
+		a.conn.Close()
+	}
 }
 
 func (a *agent) Destroy() {
-	a.conn.Destroy()
+	if a.conn != nil {
+		a.conn.Destroy()
+	}
 }

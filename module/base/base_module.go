@@ -16,6 +16,7 @@ package basemodule
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/module"
 	"github.com/liangdas/mqant/rpc"
@@ -25,6 +26,7 @@ import (
 	"github.com/liangdas/mqant/service"
 	"github.com/liangdas/mqant/utils"
 	"github.com/pkg/errors"
+	"os"
 	"sync"
 	"time"
 )
@@ -53,6 +55,7 @@ func LoadStatisticalMethod(j string) map[string]*StatisticalMethod {
 
 type BaseModule struct {
 	context.Context
+	exit        context.CancelFunc
 	App         module.App
 	subclass    module.RPCModule
 	settings    *conf.ModuleSettings
@@ -92,14 +95,13 @@ func (m *BaseModule) OnInit(subclass module.RPCModule, app module.App, settings 
 	m.settings = settings
 	m.statistical = map[string]*StatisticalMethod{}
 	//创建一个远程调用的RPC
+
 	opts := server.Options{
 		Metadata: map[string]string{},
 	}
-
 	for _, o := range opt {
 		o(&opts)
 	}
-
 	if opts.Registry == nil {
 		opt = append(opt, server.Registry(app.Registry()))
 	}
@@ -123,13 +125,18 @@ func (m *BaseModule) OnInit(subclass module.RPCModule, app module.App, settings 
 	if len(opts.Version) == 0 {
 		opt = append(opt, server.Version(subclass.Version()))
 	}
-
 	server := server.NewServer(opt...)
 	server.OnInit(subclass, app, settings)
+	hostname,_:=os.Hostname()
+	server.Options().Metadata["hostname"]=hostname
+	server.Options().Metadata["pid"]=fmt.Sprintf("%v",os.Getpid())
+	ctx, cancel := context.WithCancel(context.Background())
+	m.exit = cancel
 	m.service = service.NewService(
 		service.Server(server),
 		service.RegisterTTL(app.Options().RegisterTTL),
 		service.RegisterInterval(app.Options().RegisterInterval),
+		service.Context(ctx),
 	)
 
 	go m.service.Run()
@@ -139,6 +146,7 @@ func (m *BaseModule) OnInit(subclass module.RPCModule, app module.App, settings 
 func (m *BaseModule) OnDestroy() {
 	//注销模块
 	//一定别忘了关闭RPC
+	m.exit()
 	m.GetServer().OnDestroy()
 }
 func (m *BaseModule) SetListener(listener mqrpc.RPCListener) {

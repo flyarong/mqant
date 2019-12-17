@@ -34,6 +34,7 @@ type NatsClient struct {
 	callbackqueueName string
 	app               module.App
 	done              chan error
+	isClose   			bool
 	session           module.ServerSession
 }
 
@@ -44,6 +45,7 @@ func NewNatsClient(app module.App, session module.ServerSession) (client *NatsCl
 	client.callinfos = utils.NewBeeMap()
 	client.callbackqueueName = nats.NewInbox()
 	client.done = make(chan error)
+	client.isClose=false
 	go client.on_request_handle()
 	return client, nil
 }
@@ -52,7 +54,15 @@ func (c *NatsClient) Delete(key string) (err error) {
 	c.callinfos.Delete(key)
 	return
 }
+func (c *NatsClient) CloseFch(fch chan rpcpb.ResultInfo) {
+	defer func() {
+		if recover() != nil {
+			// close(ch) panic occur
+		}
+	}()
 
+	close(fch) // panic if ch is closed
+}
 func (c *NatsClient) Done() (err error) {
 	//关闭amqp链接通道
 	//close(c.send_chan)
@@ -62,13 +72,14 @@ func (c *NatsClient) Done() (err error) {
 	for key, clinetCallInfo := range c.callinfos.Items() {
 		if clinetCallInfo != nil {
 			//关闭管道
-			close(clinetCallInfo.(ClinetCallInfo).call)
+			c.CloseFch(clinetCallInfo.(ClinetCallInfo).call)
 			//从Map中删除
 			c.callinfos.Delete(key)
 		}
 	}
 	c.callinfos = nil
 	c.done <- nil
+	c.isClose=true
 	return
 }
 
@@ -125,6 +136,7 @@ func (c *NatsClient) on_request_handle() error {
 			l := runtime.Stack(buf, false)
 			errstr := string(buf[:l])
 			log.Error("%s\n ----Stack----\n%s", rn, errstr)
+			fmt.Println(errstr)
 		}
 	}()
 	subs, err := c.app.Transport().SubscribeSync(c.callbackqueueName)
@@ -137,12 +149,16 @@ func (c *NatsClient) on_request_handle() error {
 		subs.Unsubscribe()
 	}()
 
-	for {
+	for !c.isClose{
 		m, err := subs.NextMsg(time.Minute)
 		if err != nil && err == nats.ErrTimeout {
+			//fmt.Println(err.Error())
+			//log.Warning("NatsServer error with '%v'",err)
 			continue
 		} else if err != nil {
-			return err
+			fmt.Println(fmt.Sprintf("%v rpcclient error: %v",time.Now().String(),err.Error()))
+			log.Error("NatsServer error with '%v'",err)
+			continue
 		}
 
 		resultInfo, err := c.UnmarshalResult(m.Data)
@@ -155,7 +171,7 @@ func (c *NatsClient) on_request_handle() error {
 			c.callinfos.Delete(correlation_id)
 			if clinetCallInfo != nil {
 				clinetCallInfo.(ClinetCallInfo).call <- *resultInfo
-				close(clinetCallInfo.(ClinetCallInfo).call)
+				c.CloseFch(clinetCallInfo.(ClinetCallInfo).call)
 			} else {
 				//可能客户端已超时了，但服务端处理完还给回调了
 				log.Warning("rpc callback no found : [%s]", correlation_id)

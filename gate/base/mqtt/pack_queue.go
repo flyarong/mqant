@@ -16,6 +16,7 @@ package mqtt
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/network"
@@ -80,7 +81,7 @@ func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network
 		w:       w,
 		conn:    conn,
 		recover: recover,
-		fch:     make(chan struct{}, 1024),
+		fch:     make(chan struct{}, 256),
 		status:  CONNECTED,
 	}
 }
@@ -123,13 +124,18 @@ func (queue *PackQueue) WritePack(pack *Pack) (err error) {
 			queue.Close(err)
 		}
 	}()
+	queue.writelock.Lock()
+	if !queue.isConnected() {
+		queue.writelock.Unlock()
+		return errors.New("disconnect")
+	}
 	if queue.writeError != nil {
+		queue.writelock.Unlock()
 		return queue.writeError
 	}
-	queue.writelock.Lock()
 	err = DelayWritePack(pack, queue.w)
-	queue.fch <- struct{}{}
 	queue.writelock.Unlock()
+	queue.fch <- struct{}{}
 	if err != nil {
 		// Tell listener the error
 		// Notice the read
@@ -155,9 +161,9 @@ func (queue *PackQueue) ReadPackInLoop() {
 loop:
 	for queue.isConnected() {
 		if queue.alive > 0 {
-			queue.conn.SetReadDeadline(time.Now().Add(time.Second * time.Duration(int(float64(queue.alive)*1.5))))
+			queue.conn.SetDeadline(time.Now().Add(time.Second * time.Duration(int(float64(queue.alive)*1.5))))
 		} else {
-			queue.conn.SetReadDeadline(time.Now().Add(time.Second * 90))
+			queue.conn.SetDeadline(time.Now().Add(time.Second * 90))
 		}
 		p.pack, p.err = ReadPack(queue.r)
 		if p.err != nil {
@@ -174,11 +180,20 @@ loop:
 
 	//log.Info("read_loop Groutine will esc.")
 }
+func (queue *PackQueue) CloseFch() {
+	defer func() {
+		if recover() != nil {
+			// close(ch) panic occur
+		}
+	}()
+
+	close(queue.fch) // panic if ch is closed
+}
 
 // Close the all of queue's channels
 func (queue *PackQueue) Close(err error) error {
 	queue.writeError = err
-	close(queue.fch)
+	queue.CloseFch()
 	queue.status = CLOSED
 	return nil
 }
