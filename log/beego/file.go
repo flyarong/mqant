@@ -143,7 +143,7 @@ func (w *fileLogWriter) WriteMsg(when time.Time, msg string, level int) error {
 	if (level > w.Level) || (level < w.MinLevel) {
 		return nil
 	}
-	h, d := formatTimeHeader(when)
+	h, d := FormatTimeHeader(when)
 	msg = string(h) + msg + "\n"
 	if w.Rotate {
 		w.RLock()
@@ -176,7 +176,7 @@ func (w *fileLogWriter) WriteOriginalMsg(when time.Time, msg string, level int) 
 	if (level > w.Level) || (level < w.MinLevel) {
 		return nil
 	}
-	_, d := formatTimeHeader(when)
+	_, d := FormatTimeHeader(when)
 	msg = msg + "\n"
 	if w.Rotate {
 		w.RLock()
@@ -231,7 +231,8 @@ func (w *fileLogWriter) initFd() error {
 	if w.Daily {
 		go w.dailyRotate(w.dailyOpenTime)
 	}
-	if fInfo.Size() > 0 {
+	if fInfo.Size() > 0 && w.MaxLines > 0 {
+		//TODO 大文件读取行数非常耗时，建议不要开启
 		count, err := w.lines()
 		if err != nil {
 			return err

@@ -31,7 +31,8 @@ type NatsServer struct {
 	addr      string
 	app       module.App
 	server    *RPCServer
-	done      chan error
+	done      chan bool
+	stopeds   chan bool
 	isClose   bool
 }
 
@@ -55,28 +56,49 @@ func setAddrs(addrs []string) []string {
 func NewNatsServer(app module.App, s *RPCServer) (*NatsServer, error) {
 	server := new(NatsServer)
 	server.server = s
-	server.done = make(chan error)
-	server.isClose=false
+	server.done = make(chan bool)
+	server.stopeds = make(chan bool)
+	server.isClose = false
 	server.app = app
 	server.addr = nats.NewInbox()
-	go server.on_request_handle()
+	go func() {
+		server.on_request_handle()
+		safeClose(server.stopeds)
+	}()
 	return server, nil
 }
 func (s *NatsServer) Addr() string {
 	return s.addr
 }
 
+func safeClose(ch chan bool) {
+	defer func() {
+		if recover() != nil {
+			// close(ch) panic occur
+		}
+	}()
+
+	close(ch) // panic if ch is closed
+}
+
 /**
 注销消息队列
 */
 func (s *NatsServer) Shutdown() (err error) {
-	s.done <- nil
-	s.isClose=true
+	safeClose(s.done)
+	s.isClose = true
+	select {
+	case <-s.stopeds:
+		//等待nats注销完成
+	}
 	return
 }
 
-func (s *NatsServer) Callback(callinfo mqrpc.CallInfo) error {
-	body, _ := s.MarshalResult(callinfo.Result)
+func (s *NatsServer) Callback(callinfo *mqrpc.CallInfo) error {
+	body, err := s.MarshalResult(callinfo.Result)
+	if err != nil {
+		return err
+	}
 	reply_to := callinfo.Props["reply_to"].(string)
 	return s.app.Transport().Publish(reply_to, body)
 }
@@ -108,26 +130,28 @@ func (s *NatsServer) on_request_handle() error {
 	}
 
 	go func() {
-		<-s.done
+		select {
+		case <-s.done:
+			//服务关闭
+		}
 		subs.Unsubscribe()
 	}()
 
-	for !s.isClose{
+	for !s.isClose {
 		m, err := subs.NextMsg(time.Minute)
 		if err != nil && err == nats.ErrTimeout {
 			//fmt.Println(err.Error())
 			//log.Warning("NatsServer error with '%v'",err)
 			continue
 		} else if err != nil {
-			fmt.Println(fmt.Sprintf("%v rpcserver error: %v",time.Now().String(),err.Error()))
-			log.Error("NatsServer error with '%v'",err)
+			log.Warning("NatsServer error with '%v'", err)
 			continue
 		}
 
 		rpcInfo, err := s.Unmarshal(m.Data)
 		if err == nil {
 			callInfo := &mqrpc.CallInfo{
-				RpcInfo: *rpcInfo,
+				RPCInfo: rpcInfo,
 			}
 			callInfo.Props = map[string]interface{}{
 				"reply_to": rpcInfo.ReplyTo,
@@ -135,12 +159,11 @@ func (s *NatsServer) on_request_handle() error {
 
 			callInfo.Agent = s //设置代理为NatsServer
 
-			s.server.Call(*callInfo)
+			s.server.Call(callInfo)
 		} else {
 			fmt.Println("error ", err)
 		}
 	}
-
 	return nil
 }
 
@@ -159,8 +182,8 @@ func (s *NatsServer) Unmarshal(data []byte) (*rpcpb.RPCInfo, error) {
 }
 
 // goroutine safe
-func (s *NatsServer) MarshalResult(resultInfo rpcpb.ResultInfo) ([]byte, error) {
+func (s *NatsServer) MarshalResult(resultInfo *rpcpb.ResultInfo) ([]byte, error) {
 	//log.Error("",map2)
-	b, err := proto.Marshal(&resultInfo)
+	b, err := proto.Marshal(resultInfo)
 	return b, err
 }

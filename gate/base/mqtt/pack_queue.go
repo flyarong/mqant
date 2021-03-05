@@ -42,6 +42,8 @@ type PackQueue struct {
 
 	alive int
 
+	MaxPackSize int // mqtt包最大长度
+
 	status int
 }
 
@@ -69,20 +71,24 @@ type packAndType struct {
 }
 
 // Init a pack queue
-func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network.Conn, recover func(pAndErr *packAndErr) (err error), alive int) *PackQueue {
+func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network.Conn, recover func(pAndErr *packAndErr) (err error), alive, MaxPackSize int) *PackQueue {
 	if alive < 1 {
 		alive = conf.ReadTimeout
 	}
+	if MaxPackSize < 1 {
+		MaxPackSize = 65535
+	}
 	alive = int(float32(alive)*1.5 + 1)
 	return &PackQueue{
-		conf:    conf,
-		alive:   alive,
-		r:       r,
-		w:       w,
-		conn:    conn,
-		recover: recover,
-		fch:     make(chan struct{}, 256),
-		status:  CONNECTED,
+		conf:        conf,
+		alive:       alive,
+		MaxPackSize: MaxPackSize,
+		r:           r,
+		w:           w,
+		conn:        conn,
+		recover:     recover,
+		fch:         make(chan struct{}, 256),
+		status:      CONNECTED,
 	}
 }
 
@@ -133,6 +139,10 @@ func (queue *PackQueue) WritePack(pack *Pack) (err error) {
 		queue.writelock.Unlock()
 		return queue.writeError
 	}
+	if queue.w.Available() <= 0 {
+		queue.writelock.Unlock()
+		return fmt.Errorf("bufio.Writer is full")
+	}
 	err = DelayWritePack(pack, queue.w)
 	queue.writelock.Unlock()
 	queue.fch <- struct{}{}
@@ -161,11 +171,17 @@ func (queue *PackQueue) ReadPackInLoop() {
 loop:
 	for queue.isConnected() {
 		if queue.alive > 0 {
-			queue.conn.SetDeadline(time.Now().Add(time.Second * time.Duration(int(float64(queue.alive)*1.5))))
+			timeout := int(float64(queue.alive) * 3)
+			if timeout > 60 {
+				timeout = 60
+			} else if timeout < 10 {
+				timeout = 10
+			}
+			queue.conn.SetDeadline(time.Now().Add(time.Second * time.Duration(timeout)))
 		} else {
 			queue.conn.SetDeadline(time.Now().Add(time.Second * 90))
 		}
-		p.pack, p.err = ReadPack(queue.r)
+		p.pack, p.err = ReadPack(queue.r, queue.MaxPackSize)
 		if p.err != nil {
 			queue.Close(p.err)
 			break loop
@@ -195,6 +211,10 @@ func (queue *PackQueue) Close(err error) error {
 	queue.writeError = err
 	queue.CloseFch()
 	queue.status = CLOSED
+	if queue.conn != nil {
+		//再关闭一下,防止文件描述符发生泄漏
+		queue.conn.Close()
+	}
 	return nil
 }
 

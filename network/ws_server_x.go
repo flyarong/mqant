@@ -3,17 +3,20 @@ package network
 import (
 	"crypto/tls"
 	"github.com/liangdas/mqant/log"
+	"github.com/liangdas/mqant/utils/ip"
 	"golang.org/x/net/websocket"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
+// WSServer websocket服务器
 type WSServer struct {
 	Addr        string
-	Tls         bool //是否支持tls
+	TLS         bool //是否支持tls
 	CertFile    string
 	KeyFile     string
 	MaxConnNum  int
@@ -24,6 +27,7 @@ type WSServer struct {
 	handler     *WSHandler
 }
 
+// WSHandler websocket 处理器
 type WSHandler struct {
 	maxConnNum int
 	maxMsgLen  uint32
@@ -32,7 +36,7 @@ type WSHandler struct {
 	wg         sync.WaitGroup
 }
 
-func (handler *WSHandler) Echo(conn *websocket.Conn) {
+func (handler *WSHandler) echo(conn *websocket.Conn) {
 	handler.wg.Add(1)
 	defer handler.wg.Done()
 	conn.PayloadType = websocket.BinaryFrame
@@ -42,8 +46,6 @@ func (handler *WSHandler) Echo(conn *websocket.Conn) {
 
 	// cleanup
 	wsConn.Close()
-	handler.mutexConns.Lock()
-	handler.mutexConns.Unlock()
 	agent.OnClose()
 }
 
@@ -53,7 +55,7 @@ func (handler *WSHandler) Echo(conn *websocket.Conn) {
 //		return
 //	}
 //	ws := websocket.Server{
-//		Handler: websocket.Handler(handler.Echo),
+//		Handler: websocket.Handler(handler.echo),
 //		Handshake: func(config *websocket.Config, request *http.Request) error {
 //			var scheme string
 //			if request.TLS != nil {
@@ -70,6 +72,7 @@ func (handler *WSHandler) Echo(conn *websocket.Conn) {
 //	ws.ServeHTTP(w, r)
 //}
 
+// Start 开启监听websocket端口
 func (server *WSServer) Start() {
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
@@ -83,7 +86,7 @@ func (server *WSServer) Start() {
 	if server.NewAgent == nil {
 		log.Warning("NewAgent must not be nil")
 	}
-	if server.Tls {
+	if server.TLS {
 		tlsConf := new(tls.Config)
 		tlsConf.Certificates = make([]tls.Certificate, 1)
 		tlsConf.Certificates[0], err = tls.LoadX509KeyPair(server.CertFile, server.KeyFile)
@@ -101,7 +104,7 @@ func (server *WSServer) Start() {
 		newAgent:   server.NewAgent,
 	}
 	ws := websocket.Server{
-		Handler: websocket.Handler(server.handler.Echo),
+		Handler: websocket.Handler(server.handler.echo),
 		Handshake: func(config *websocket.Config, r *http.Request) error {
 			var scheme string
 			if r.TLS != nil {
@@ -109,9 +112,15 @@ func (server *WSServer) Start() {
 			} else {
 				scheme = "ws"
 			}
-			config.Origin, _ = url.ParseRequestURI(scheme + "://" + r.RemoteAddr + r.URL.RequestURI())
+			real_ip := iptool.RealIP(r)
+			config.Origin, _ = url.ParseRequestURI(scheme + "://" + real_ip + r.URL.RequestURI())
 			offeredProtocol := r.Header.Get("Sec-WebSocket-Protocol")
-			config.Protocol = []string{offeredProtocol}
+			ptls := strings.Split(offeredProtocol, ",")
+			if len(ptls) > 0 {
+				config.Protocol = []string{ptls[0]}
+			} else {
+				config.Protocol = []string{"mqtt"}
+			}
 			return nil
 		},
 	}
@@ -126,6 +135,7 @@ func (server *WSServer) Start() {
 	go httpServer.Serve(ln)
 }
 
+// Close 停止监听websocket端口
 func (server *WSServer) Close() {
 	server.ln.Close()
 

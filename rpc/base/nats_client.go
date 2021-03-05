@@ -29,12 +29,12 @@ import (
 
 type NatsClient struct {
 	//callinfos map[string]*ClinetCallInfo
-	callinfos         *utils.BeeMap
+	callinfos         *mqanttools.BeeMap
 	cmutex            sync.Mutex //操作callinfos的锁
 	callbackqueueName string
 	app               module.App
 	done              chan error
-	isClose   			bool
+	isClose           bool
 	session           module.ServerSession
 }
 
@@ -42,10 +42,10 @@ func NewNatsClient(app module.App, session module.ServerSession) (client *NatsCl
 	client = new(NatsClient)
 	client.session = session
 	client.app = app
-	client.callinfos = utils.NewBeeMap()
+	client.callinfos = mqanttools.NewBeeMap()
 	client.callbackqueueName = nats.NewInbox()
 	client.done = make(chan error)
-	client.isClose=false
+	client.isClose = false
 	go client.on_request_handle()
 	return client, nil
 }
@@ -54,7 +54,7 @@ func (c *NatsClient) Delete(key string) (err error) {
 	c.callinfos.Delete(key)
 	return
 }
-func (c *NatsClient) CloseFch(fch chan rpcpb.ResultInfo) {
+func (c *NatsClient) CloseFch(fch chan *rpcpb.ResultInfo) {
 	defer func() {
 		if recover() != nil {
 			// close(ch) panic occur
@@ -79,28 +79,28 @@ func (c *NatsClient) Done() (err error) {
 	}
 	c.callinfos = nil
 	c.done <- nil
-	c.isClose=true
+	c.isClose = true
 	return
 }
 
 /**
 消息请求
 */
-func (c *NatsClient) Call(callInfo mqrpc.CallInfo, callback chan rpcpb.ResultInfo) error {
+func (c *NatsClient) Call(callInfo *mqrpc.CallInfo, callback chan *rpcpb.ResultInfo) error {
 	//var err error
 	if c.callinfos == nil {
 		return fmt.Errorf("AMQPClient is closed")
 	}
-	callInfo.RpcInfo.ReplyTo = c.callbackqueueName
-	var correlation_id = callInfo.RpcInfo.Cid
+	callInfo.RPCInfo.ReplyTo = c.callbackqueueName
+	var correlation_id = callInfo.RPCInfo.Cid
 
 	clinetCallInfo := &ClinetCallInfo{
 		correlation_id: correlation_id,
 		call:           callback,
-		timeout:        callInfo.RpcInfo.Expired,
+		timeout:        callInfo.RPCInfo.Expired,
 	}
 	c.callinfos.Set(correlation_id, *clinetCallInfo)
-	body, err := c.Marshal(&callInfo.RpcInfo)
+	body, err := c.Marshal(callInfo.RPCInfo)
 	if err != nil {
 		return err
 	}
@@ -110,8 +110,8 @@ func (c *NatsClient) Call(callInfo mqrpc.CallInfo, callback chan rpcpb.ResultInf
 /**
 消息请求 不需要回复
 */
-func (c *NatsClient) CallNR(callInfo mqrpc.CallInfo) error {
-	body, err := c.Marshal(&callInfo.RpcInfo)
+func (c *NatsClient) CallNR(callInfo *mqrpc.CallInfo) error {
+	body, err := c.Marshal(callInfo.RPCInfo)
 	if err != nil {
 		return err
 	}
@@ -149,15 +149,15 @@ func (c *NatsClient) on_request_handle() error {
 		subs.Unsubscribe()
 	}()
 
-	for !c.isClose{
+	for !c.isClose {
 		m, err := subs.NextMsg(time.Minute)
 		if err != nil && err == nats.ErrTimeout {
 			//fmt.Println(err.Error())
 			//log.Warning("NatsServer error with '%v'",err)
 			continue
 		} else if err != nil {
-			fmt.Println(fmt.Sprintf("%v rpcclient error: %v",time.Now().String(),err.Error()))
-			log.Error("NatsServer error with '%v'",err)
+			fmt.Println(fmt.Sprintf("%v rpcclient error: %v", time.Now().String(), err.Error()))
+			log.Error("NatsClient error with '%v'", err)
 			continue
 		}
 
@@ -170,8 +170,10 @@ func (c *NatsClient) on_request_handle() error {
 			//删除
 			c.callinfos.Delete(correlation_id)
 			if clinetCallInfo != nil {
-				clinetCallInfo.(ClinetCallInfo).call <- *resultInfo
-				c.CloseFch(clinetCallInfo.(ClinetCallInfo).call)
+				if clinetCallInfo.(ClinetCallInfo).call != nil {
+					clinetCallInfo.(ClinetCallInfo).call <- resultInfo
+					c.CloseFch(clinetCallInfo.(ClinetCallInfo).call)
+				}
 			} else {
 				//可能客户端已超时了，但服务端处理完还给回调了
 				log.Warning("rpc callback no found : [%s]", correlation_id)
